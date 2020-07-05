@@ -254,6 +254,69 @@ class BaseDMRG:
 
     return energy
 
+  def _optimize_2s_local(self,
+                         sweep_dir,
+                         num_krylov_vecs=10,
+                         tol=1E-5,
+                         delta=1E-6,
+                         ndiag=10) -> np.number:
+    """
+    Single-site optimization at the current position of the center site.
+    Args:
+      sweep_dir: Sweep direction; 'left' or 'l' for a sweep from right to left,
+        'right' or 'r' for a sweep from left to right.
+      num_krylov_vecs: Dimension of the Krylov space used in `eighs_lanczos`.
+      tol: The desired precision of the eigenvalues in `eigsh_lanczos'.
+      delta: Stopping criterion for Lanczos iteration.
+        If a Krylov vector :math: `x_n` has an L2 norm
+        :math:`\\lVert x_n\\rVert < delta`, the iteration
+        is stopped.
+      ndiag: Inverse frequencey of tridiagonalizations in `eighs_lanczos`.
+    Returns:
+      float/complex: The local energy after optimization.
+    """
+    site = self.mps.center_position
+    #note: some backends will jit functions
+    self.left_envs[site]
+    self.right_envs[site]
+    energies, states = self.backend.eigsh_lanczos(
+        A=self.single_site_matvec,
+        args=[
+            self.left_envs[site], self.mpo.tensors[site], self.right_envs[site]
+        ],
+        initial_state=self.mps.tensors[site],
+        num_krylov_vecs=num_krylov_vecs,
+        numeig=1,
+        tol=tol,
+        delta=delta,
+        ndiag=ndiag,
+        reorthogonalize=False)
+    local_ground_state = states[0]
+    energy = energies[0]
+    local_ground_state /= self.backend.norm(local_ground_state)
+
+    if sweep_dir in ('r', 'right'):
+      Q, R = self.mps.qr_decomposition(local_ground_state)
+      self.mps.tensors[site] = Q
+      if site < len(self.mps.tensors) - 1:
+        self.mps.center_position += 1
+        self.mps.tensors[site + 1] = self.mps.lcontract(
+            R, self.mps.tensors[site + 1])
+        self.left_envs[site + 1] = self.add_left_layer(self.left_envs[site], Q,
+                                                       self.mpo.tensors[site])
+
+    elif sweep_dir in ('l', 'left'):
+      R, Q = self.mps.rq_decomposition(local_ground_state)
+      self.mps.tensors[site] = Q
+      if site > 0:
+        self.mps.center_position -= 1
+        self.mps.tensors[site - 1] = self.mps.rcontract(
+            self.mps.tensors[site - 1], R)
+        self.right_envs[site - 1] = self.add_right_layer(
+            self.right_envs[site], Q, self.mpo.tensors[site])
+
+    return energy
+
   def run_one_site(self,
                    num_sweeps=4,
                    precision=1E-6,
@@ -287,7 +350,7 @@ class BaseDMRG:
     """
     converged = False
     final_energy = 1E100
-    iteration = 0
+    iteration = 1
     initial_site = 0
     self.mps.position(0)  #move center position to the left end
     self.compute_right_envs()
@@ -354,6 +417,105 @@ class BaseDMRG:
         break
     return final_energy
 
+  def run_two_site(self,
+                   num_sweeps=4,
+                   precision=1E-6,
+                   num_krylov_vecs=10,
+                   verbose=0,
+                   delta=1E-6,
+                   tol=1E-6,
+                   ndiag=10) -> np.number:
+    """
+    Run a single-site DMRG optimization of the MPS.
+    Args:
+      num_sweeps: Number of DMRG sweeps. A sweep optimizes all sites
+        starting at the left side, moving to the right side, and back
+        to the left side.
+      precision: The desired precision of the energy. If `precision` is
+        reached, optimization is terminated.
+      num_krylov_vecs: Krylov space dimension used in the iterative
+        eigsh_lanczos method.
+      verbose: Verbosity flag. Us`verbose=0` to suppress any output.
+        Larger values produce increasingly more output.
+      delta: Convergence parameter of `eigsh_lanczos` to determine if
+        an invariant subspace has been found.
+      tol: Tolerance parameter of `eigsh_lanczos`. If eigenvalues in
+        `eigsh_lanczos` have converged within `tol`, `eighs_lanczos`
+        is terminted.
+      ndiag: Inverse frequency at which eigenvalues of the
+        tridiagonal Hamiltonian produced by `eigsh_lanczos` are tested
+        for convergence. `ndiag=10` tests at every tenth step.
+    Returns:
+      float: The energy upon termination of `run_one_site`.
+    """
+    converged = False
+    final_energy = 1E100
+    iteration = 1
+    initial_site = 0
+    self.mps.position(0)  #move center position to the left end
+    self.compute_right_envs()
+
+    def print_msg(site):
+      if verbose > 0:
+        stdout.write("\rSS-DMRG it=%i/%i, site=%i/%i: optimized E=%.16f+%.16f" %
+                     (iteration, num_sweeps, site, len(
+                         self.mps)-1, np.real(energy), np.imag(energy)))
+        stdout.flush()
+        print()
+      if verbose > 1:
+        print("")
+
+    while not converged:
+
+      if initial_site == 0:
+        self.position(0)
+        #the part outside the loop covers the len(self)==1 case
+        energy = self._optimize_2s_local(
+            sweep_dir='right',
+            num_krylov_vecs=num_krylov_vecs,
+            tol=tol,
+            delta=delta,
+            ndiag=ndiag)
+
+        initial_site += 1
+        print_msg(site=0)
+
+
+      while self.mps.center_position < len(self.mps) - 1:
+        #_optimize_2site_local shifts the center site internally
+        energy = self._optimize_2s_local(
+            sweep_dir='right',
+            num_krylov_vecs=num_krylov_vecs,
+            tol=tol,
+            delta=delta,
+            ndiag=ndiag)
+
+        print_msg(site=self.mps.center_position-1)
+
+      #prepare for right sweep: move center all the way to the right
+      self.position(len(self.mps) - 1)
+      while self.mps.center_position > 0:
+        #_optimize_2site_local shifts the center site internally
+        energy = self._optimize_2s_local(
+            sweep_dir='left',
+            num_krylov_vecs=num_krylov_vecs,
+            tol=tol,
+            delta=delta,
+            ndiag=ndiag)
+
+        print_msg(site=self.mps.center_position+1)
+
+      if np.abs(final_energy - energy) < precision:
+        converged = True
+      final_energy = energy
+      iteration += 1
+      if iteration > num_sweeps:
+        if verbose > 0:
+          print()
+          print("dmrg did not converge to desired precision {0} "
+                "after {1} iterations".format(precision, num_sweeps))
+        break
+    return final_energy
 
 class FiniteDMRG(BaseDMRG):
   """

@@ -48,4 +48,4 @@ mps1tensors = mps.tensors
 mps1 = FiniteMPS(mps1tensors, center_position=0, backend=backend)
 
 dmrg = FiniteDMRG(mps, mpo)
-energy = dmrg.run_one_site(num_sweeps=6, num_krylov_vecs=10, verbose=1)
+energy = dmrg.run_two_site(num_sweeps=6, num_krylov_vecs=10, verbose=1)
