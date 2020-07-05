@@ -296,12 +296,14 @@ class BaseDMRG:
       if verbose > 0:
         stdout.write("\rSS-DMRG it=%i/%i, site=%i/%i: optimized E=%.16f+%.16f" %
                      (iteration, num_sweeps, site, len(
-                         self.mps), np.real(energy), np.imag(energy)))
+                         self.mps)-1, np.real(energy), np.imag(energy)))
         stdout.flush()
+        print()
       if verbose > 1:
         print("")
 
     while not converged:
+
       if initial_site == 0:
         self.position(0)
         #the part outside the loop covers the len(self)==1 case
@@ -315,7 +317,8 @@ class BaseDMRG:
         initial_site += 1
         print_msg(site=0)
 
-      for site in range(initial_site, len(self.mps) - 1):
+
+      while self.mps.center_position < len(self.mps) - 1:
         #_optimize_1site_local shifts the center site internally
         energy = self._optimize_1s_local(
             sweep_dir='right',
@@ -324,11 +327,12 @@ class BaseDMRG:
             delta=delta,
             ndiag=ndiag)
 
-        print_msg(site=site)
+        print_msg(site=self.mps.center_position-1)
 
+      print('before left, ', self.mps.center_position)
       #prepare for right sweep: move center all the way to the right
       self.position(len(self.mps) - 1)
-      for site in reversed(range(len(self.mps) - 1)):
+      while self.mps.center_position > 0:
         #_optimize_1site_local shifts the center site internally
         energy = self._optimize_1s_local(
             sweep_dir='left',
@@ -337,7 +341,7 @@ class BaseDMRG:
             delta=delta,
             ndiag=ndiag)
 
-        print_msg(site=site)
+        print_msg(site=self.mps.center_position+1)
 
       if np.abs(final_energy - energy) < precision:
         converged = True
