@@ -329,7 +329,6 @@ class BaseDMRG:
 
         print_msg(site=self.mps.center_position-1)
 
-      print('before left, ', self.mps.center_position)
       #prepare for right sweep: move center all the way to the right
       self.position(len(self.mps) - 1)
       while self.mps.center_position > 0:
