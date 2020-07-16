@@ -36,12 +36,12 @@ class BaseDMRG:
     """
     Base class for DMRG simulations.
     Args:
-      mps: The initial mps. Should be either FiniteMPS or InfiniteMPS 
+      mps: The initial mps. Should be either FiniteMPS or InfiniteMPS
         (latter is not yet supported).
       mpo: A `FiniteMPO` or `InfiniteMPO` object.
-      lb:  The left boundary environment. `lb` has to have shape 
+      lb:  The left boundary environment. `lb` has to have shape
         (mpo[0].shape[0],mps[0].shape[0],mps[0].shape[0])
-      rb: The right environment. `rb` has to have shape 
+      rb: The right environment. `rb` has to have shape
         (mpo[-1].shape[1],mps[-1].shape[1],mps[-1].shape[1])
       name: An optional name for the simulation.
     Raises:
@@ -81,8 +81,15 @@ class BaseDMRG:
                   [[3, 1, -1], [1, 2, 4], [3, 5, -2, 2], [5, 4, -3]],
                   backend=self.backend.name)
 
-    #jitting happens inside eighs_lanczos
+     #jitting happens inside eighs_lanczos
     self.single_site_matvec = _single_site_matvec
+
+    def _two_site_matvec(mps_bond_tensor, L, mpo_bond_tensor, R):
+      return ncon([L, mps_bond_tensor, mpo_bond_tensor, R],
+                  [[3, 1, -1], [1, 2, 4, 5], [3,6, -2, -3, 2, 4], [6, 5, -4]],
+                  backend=self.backend.name)
+
+    self.two_site_matvec = _two_site_matvec
 
     ######################################################################
     ###############  DEFINE JITTED FUNCTIONS   ###########################
@@ -123,9 +130,9 @@ class BaseDMRG:
 
   def position(self, site: int):
     """
-    Shifts the center position `site`, and updates left and 
-    right environments accordingly. Left blocks at sites > `site` are set 
-    to `None`, and right blocks at sites < `site` are `None`. 
+    Shifts the center position `site`, and updates left and
+    right environments accordingly. Left blocks at sites > `site` are set
+    to `None`, and right blocks at sites < `site` are `None`.
     Args:
       site: The site to which the position of the center-site should be shifted.
     Returns: BaseDMRG
@@ -168,7 +175,7 @@ class BaseDMRG:
 
   def compute_left_envs(self) -> None:
     """
-    Compute all left environment blocks of sites up to 
+    Compute all left environment blocks of sites up to
     (including) self.mps.center_position.
     """
     lb = self.left_envs[0]
@@ -192,69 +199,6 @@ class BaseDMRG:
                                                     self.mpo.tensors[n])
 
   def _optimize_1s_local(self,
-                         sweep_dir,
-                         num_krylov_vecs=10,
-                         tol=1E-5,
-                         delta=1E-6,
-                         ndiag=10) -> np.number:
-    """
-    Single-site optimization at the current position of the center site.
-    Args:
-      sweep_dir: Sweep direction; 'left' or 'l' for a sweep from right to left,
-        'right' or 'r' for a sweep from left to right.
-      num_krylov_vecs: Dimension of the Krylov space used in `eighs_lanczos`.
-      tol: The desired precision of the eigenvalues in `eigsh_lanczos'.
-      delta: Stopping criterion for Lanczos iteration.
-        If a Krylov vector :math: `x_n` has an L2 norm
-        :math:`\\lVert x_n\\rVert < delta`, the iteration
-        is stopped. 
-      ndiag: Inverse frequencey of tridiagonalizations in `eighs_lanczos`.
-    Returns:
-      float/complex: The local energy after optimization.
-    """
-    site = self.mps.center_position
-    #note: some backends will jit functions
-    self.left_envs[site]
-    self.right_envs[site]
-    energies, states = self.backend.eigsh_lanczos(
-        A=self.single_site_matvec,
-        args=[
-            self.left_envs[site], self.mpo.tensors[site], self.right_envs[site]
-        ],
-        initial_state=self.mps.tensors[site],
-        num_krylov_vecs=num_krylov_vecs,
-        numeig=1,
-        tol=tol,
-        delta=delta,
-        ndiag=ndiag,
-        reorthogonalize=False)
-    local_ground_state = states[0]
-    energy = energies[0]
-    local_ground_state /= self.backend.norm(local_ground_state)
-
-    if sweep_dir in ('r', 'right'):
-      Q, R = self.mps.qr_decomposition(local_ground_state)
-      self.mps.tensors[site] = Q
-      if site < len(self.mps.tensors) - 1:
-        self.mps.center_position += 1
-        self.mps.tensors[site + 1] = self.mps.lcontract(
-            R, self.mps.tensors[site + 1])
-        self.left_envs[site + 1] = self.add_left_layer(self.left_envs[site], Q,
-                                                       self.mpo.tensors[site])
-
-    elif sweep_dir in ('l', 'left'):
-      R, Q = self.mps.rq_decomposition(local_ground_state)
-      self.mps.tensors[site] = Q
-      if site > 0:
-        self.mps.center_position -= 1
-        self.mps.tensors[site - 1] = self.mps.rcontract(
-            self.mps.tensors[site - 1], R)
-        self.right_envs[site - 1] = self.add_right_layer(
-            self.right_envs[site], Q, self.mpo.tensors[site])
-
-    return energy
-
-  def _optimize_2s_local(self,
                          sweep_dir,
                          num_krylov_vecs=10,
                          tol=1E-5,
@@ -317,6 +261,115 @@ class BaseDMRG:
 
     return energy
 
+  def _optimize_2s_local(self,
+                         sweep_dir,
+                         num_krylov_vecs=20,
+                         tol=1E-8,
+                         delta=1E-8,
+                         ndiag=20) -> np.number:
+    """
+    Single-site optimization at the current position of the center site.
+    Args:
+      sweep_dir: Sweep direction; 'left' or 'l' for a sweep from right to left,
+        'right' or 'r' for a sweep from left to right.
+      num_krylov_vecs: Dimension of the Krylov space used in `eighs_lanczos`.
+      tol: The desired precision of the eigenvalues in `eigsh_lanczos'.
+      delta: Stopping criterion for Lanczos iteration.
+        If a Krylov vector :math: `x_n` has an L2 norm
+        :math:`\\lVert x_n\\rVert < delta`, the iteration
+        is stopped.
+      ndiag: Inverse frequencey of tridiagonalizations in `eighs_lanczos`.
+    Returns:
+      float/complex: The local energy after optimization.
+    """
+    site = self.mps.center_position
+    #note: some backends will jit functions
+
+    if sweep_dir in ('r', 'right'):
+      L_sweep = self.left_envs[site]
+
+      bond_mps = ncon([self.mps.tensors[site], self.mps.tensors[site + 1]],
+                      [[-1, -2, 1], [1, -3, -4]],
+                      backend=self.backend.name)
+
+      bond_mpo = ncon([self.mpo.tensors[site], self.mpo.tensors[site + 1]],
+                      [[-1, 1, -3, -5], [1, -2, -4, -6]],
+                      backend=self.backend.name)
+
+      R_sweep = self.right_envs[site + 1]
+
+    elif sweep_dir in ('l', 'left'):
+      L_sweep = self.left_envs[site-1]
+
+      bond_mps = ncon([self.mps.tensors[site - 1],self.mps.tensors[site]],
+                      [[-1, -2, 1], [1, -3, -4]],
+                      backend=self.backend.name)
+
+      bond_mpo = ncon([self.mpo.tensors[site - 1], self.mpo.tensors[site]],
+                      [[-1, 1, -3, -5], [1, -2, -4, -6]],
+                      backend=self.backend.name)
+
+      R_sweep = self.right_envs[site]
+
+
+
+    energies, states = self.backend.eigsh_lanczos(
+        A=self.two_site_matvec,
+        args=[
+            L_sweep, bond_mpo, R_sweep
+        ],
+        initial_state=bond_mps,
+        num_krylov_vecs=num_krylov_vecs,
+        numeig=1,
+        tol=tol,
+        delta=delta,
+        ndiag=ndiag,
+        reorthogonalize=False)
+    local_ground_state = states[0]
+    energy = energies[0]
+    local_ground_state /= self.backend.norm(local_ground_state)
+
+    '''
+    temp = ncon([self.mps.tensors[site], self.mps.tensors[site+1]],
+         [[-1, -2, 2], [2, -3, -4]],
+         backend=self.backend.name)
+
+    print('temp shape ', temp.shape)
+    u, s, vh, s_rest = self.mps.svd_decomposition(temp)
+    s = self.backend.diag(s)
+    print('SVD shapes ', u.shape, s.shape, vh.shape)
+    svd_ncon = ncon([u, s, vh],
+         [[-1, -2, 2], [2,3], [3,-3,-4]],
+         backend=self.backend.name)
+    '''
+    if sweep_dir in ('r', 'right'):
+      u, s, vh, _ = self.mps.svd_decomposition(local_ground_state, max_singular_values=32)
+      s = self.backend.diag(s)
+
+      self.mps.tensors[site] = u
+      if site < len(self.mps.tensors) - 1:
+        self.mps.center_position += 1
+        self.mps.tensors[site + 1] = self.mps.lcontract(
+          s, vh)
+
+        self.left_envs[site + 1] = self.add_left_layer(self.left_envs[site], u,
+                                                       self.mpo.tensors[site])
+
+    elif sweep_dir in ('l', 'left'):
+      u, s, vh, _ = self.mps.svd_decomposition(local_ground_state, max_singular_values=32)
+      s = self.backend.diag(s)
+
+      self.mps.tensors[site] = vh
+
+      if site > 0:
+        self.mps.center_position -= 1
+        self.mps.tensors[site - 1] = self.mps.rcontract(
+            u, s)
+        self.right_envs[site - 1] = self.add_right_layer(
+            self.right_envs[site], vh, self.mpo.tensors[site])
+
+    return energy
+
   def run_one_site(self,
                    num_sweeps=4,
                    precision=1E-6,
@@ -333,17 +386,17 @@ class BaseDMRG:
         to the left side.
       precision: The desired precision of the energy. If `precision` is
         reached, optimization is terminated.
-      num_krylov_vecs: Krylov space dimension used in the iterative 
+      num_krylov_vecs: Krylov space dimension used in the iterative
         eigsh_lanczos method.
-      verbose: Verbosity flag. Us`verbose=0` to suppress any output. 
+      verbose: Verbosity flag. Us`verbose=0` to suppress any output.
         Larger values produce increasingly more output.
-      delta: Convergence parameter of `eigsh_lanczos` to determine if 
+      delta: Convergence parameter of `eigsh_lanczos` to determine if
         an invariant subspace has been found.
-      tol: Tolerance parameter of `eigsh_lanczos`. If eigenvalues in 
-        `eigsh_lanczos` have converged within `tol`, `eighs_lanczos` 
+      tol: Tolerance parameter of `eigsh_lanczos`. If eigenvalues in
+        `eigsh_lanczos` have converged within `tol`, `eighs_lanczos`
         is terminted.
-      ndiag: Inverse frequency at which eigenvalues of the 
-        tridiagonal Hamiltonian produced by `eigsh_lanczos` are tested 
+      ndiag: Inverse frequency at which eigenvalues of the
+        tridiagonal Hamiltonian produced by `eigsh_lanczos` are tested
         for convergence. `ndiag=10` tests at every tenth step.
     Returns:
       float: The energy upon termination of `run_one_site`.

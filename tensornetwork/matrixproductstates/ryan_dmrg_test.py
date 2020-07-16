@@ -6,6 +6,7 @@ import pytest
 import numpy as np
 import copy
 import sys
+from tensornetwork.backends.numpy import numpy_backend
 
 
 def get_XXZ_Hamiltonian(N, Jx, Jy, Jz):
@@ -27,10 +28,10 @@ def get_XXZ_Hamiltonian(N, Jx, Jy, Jz):
     return H
 
 
-backend = 'numpy'
-dtype = np.float64
 
-N = 7
+dtype = np.float64
+backend = 'numpy'
+N = 9
 
 # H = get_XXZ_Hamiltonian(N, 1, 1, 1)
 # eta, _ = np.linalg.eigh(H)
@@ -48,4 +49,4 @@ mps1tensors = mps.tensors
 mps1 = FiniteMPS(mps1tensors, center_position=0, backend=backend)
 
 dmrg = FiniteDMRG(mps, mpo)
-energy = dmrg.run_two_site(num_sweeps=6, num_krylov_vecs=10, verbose=1)
+energy = dmrg.run_two_site(num_sweeps=6, num_krylov_vecs=100, verbose=1)

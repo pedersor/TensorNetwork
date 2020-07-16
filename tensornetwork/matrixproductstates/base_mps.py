@@ -98,8 +98,8 @@ class BaseMPS:
     ########################################################################
     ##########       define functions for jitted operations       ##########
     ########################################################################
-    def svd_decomposition(tensor):
-      return self.backend.svd_decomposition(tensor, 2)
+    def svd_decomposition(tensor, max_singular_values=None):
+      return self.backend.svd_decomposition(tensor, 2, max_singular_values=max_singular_values)
 
     self.svd_decomposition = self.backend.jit(svd_decomposition)
 
