@@ -18,6 +18,15 @@ def test_tensordot():
   np.testing.assert_allclose(expected, actual)
 
 
+def test_tensordot_int():
+  backend = numpy_backend.NumPyBackend()
+  a = backend.convert_to_tensor(2 * np.ones((3, 3, 3)))
+  b = backend.convert_to_tensor(np.ones((3, 3, 3)))
+  actual = backend.tensordot(a, b, 1)
+  expected = np.tensordot(a, b, 1)
+  np.testing.assert_allclose(expected, actual)
+
+
 def test_reshape():
   backend = numpy_backend.NumPyBackend()
   a = backend.convert_to_tensor(np.ones((2, 3, 4)))
@@ -30,6 +39,16 @@ def test_transpose():
   a = backend.convert_to_tensor(
       np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
   actual = backend.transpose(a, [2, 0, 1])
+  expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
+  np.testing.assert_allclose(expected, actual)
+
+
+def test_transpose_noperm():
+  backend = numpy_backend.NumPyBackend()
+  a = backend.convert_to_tensor(
+      np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
+  actual = backend.transpose(a) # [2, 1, 0]
+  actual = backend.transpose(actual, perm=[0, 2, 1])
   expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
   np.testing.assert_allclose(expected, actual)
 
@@ -416,7 +435,7 @@ def test_gmres_raises():
   b = np.zeros((N,), dtype=np.float64)
   diff = (f"If x0 is supplied, its dtype, {x0.dtype}, must match b's"
           f", {b.dtype}.")
-  with pytest.raises(ValueError, match=diff): # x0, b have different dtypes
+  with pytest.raises(TypeError, match=diff): # x0, b have different dtypes
     backend.gmres(dummy_mv, b, x0=x0)
 
   x0 = np.zeros((N,))
@@ -426,15 +445,11 @@ def test_gmres_raises():
     backend.gmres(dummy_mv, b, x0=x0)
 
   num_krylov_vectors = 0
-  diff = (f"num_krylov_vectors must be in "
-          f"0 < {num_krylov_vectors} <= {b.size}")
+  diff = (f"num_krylov_vectors must be positive, not"
+          f"{num_krylov_vectors}.")
   with pytest.raises(ValueError, match=diff): # num_krylov_vectors <= 0
     backend.gmres(dummy_mv, b, num_krylov_vectors=num_krylov_vectors)
   num_krylov_vectors = N+1
-  diff = (f"num_krylov_vectors must be in "
-          f"0 < {num_krylov_vectors} <= {b.size}")
-  with pytest.raises(ValueError, match=diff): # num_krylov_vectors > b.size
-    backend.gmres(dummy_mv, b, num_krylov_vectors=num_krylov_vectors)
 
   tol = -1.
   diff = (f"tol = {tol} must be positive.")
@@ -458,6 +473,7 @@ def test_gmres_on_small_known_problem(dtype):
     return A @ x
   x, _ = backend.gmres(A_mv, b, x0=x0, num_krylov_vectors=n_kry)
   solution = np.array([2., 1.], dtype=dtype)
+  assert x.dtype == solution.dtype
   np.testing.assert_allclose(x, solution)
 
 
@@ -472,7 +488,27 @@ def test_gmres_on_larger_random_problem(dtype):
     return A @ x
   b = A_mv(solution)
   tol = b.size * np.finfo(dtype).eps
-  x, _ = backend.gmres(A_mv, b, tol=tol) # atol = tol by default
+  x, _ = backend.gmres(A_mv, b, tol=tol, num_krylov_vectors=100)
+  err = np.linalg.norm(np.abs(x)-np.abs(solution))
+  rtol = tol*np.linalg.norm(b)
+  atol = tol
+  assert err < max(rtol, atol)
+
+
+@pytest.mark.parametrize("dtype", np_dtypes)
+def test_gmres_not_matrix(dtype):
+  backend = numpy_backend.NumPyBackend()
+  matshape = (100, 100)
+  vecshape = (100,)
+  A = backend.randn(matshape, dtype=dtype, seed=10)
+  A = backend.reshape(A, (2, 50, 2, 50))
+  solution = backend.randn(vecshape, dtype=dtype, seed=10)
+  solution = backend.reshape(solution, (2, 50))
+  def A_mv(x):
+    return backend.einsum('ijkl,kl', A, x)
+  b = A_mv(solution)
+  tol = b.size * np.finfo(dtype).eps
+  x, _ = backend.gmres(A_mv, b, tol=tol, num_krylov_vectors=100)
   err = np.linalg.norm(np.abs(x)-np.abs(solution))
   rtol = tol*np.linalg.norm(b)
   atol = tol
@@ -894,14 +930,22 @@ def test_trace(dtype, offset, axis1, axis2):
     expected = np.trace(array, offset=offset, axis1=axis1, axis2=axis2)
     np.testing.assert_allclose(actual, expected)
 
-
+@pytest.mark.parametrize("pivot_axis", [-1, 1, 2])
 @pytest.mark.parametrize("dtype", np_dtypes)
-def test_pivot(dtype):
+def test_pivot(dtype, pivot_axis):
   shape = (4, 3, 2, 8)
+  pivot_shape = (np.prod(shape[:pivot_axis]), np.prod(shape[pivot_axis:]))
   backend = numpy_backend.NumPyBackend()
   tensor = backend.randn(shape, dtype=dtype, seed=10)
-  cols = 12
-  rows = 16
-  expected = tensor.reshape((cols, rows))
-  actual = backend.pivot(tensor, pivot_axis=2)
+  expected = tensor.reshape(pivot_shape)
+  actual = backend.pivot(tensor, pivot_axis=pivot_axis)
   np.testing.assert_allclose(expected, actual)
+
+@pytest.mark.parametrize('dtype', np_dtypes)
+def test_serialize(dtype):
+  shape = (8, 6, 4, 2, 1)
+  backend = numpy_backend.NumPyBackend()
+  tensor = backend.randn(shape, dtype=dtype, seed=10)
+  s = backend.serialize_tensor(tensor)
+  assert isinstance(s, str)
+  assert (tensor == backend.deserialize_tensor(s)).all()

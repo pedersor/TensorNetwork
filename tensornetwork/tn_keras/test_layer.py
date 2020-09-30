@@ -6,11 +6,11 @@ import shutil
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Sequential, load_model  # type: ignore
 import tensorflow as tf
-from tensornetwork.tn_keras.dense import DenseDecomp
-from tensornetwork.tn_keras.mpo import DenseMPO
-from tensornetwork.tn_keras.condenser import DenseCondenser
-from tensornetwork.tn_keras.expander import DenseExpander
-from tensornetwork.tn_keras.entangler import DenseEntangler
+from tensornetwork.tn_keras.layers import DenseDecomp
+from tensornetwork.tn_keras.layers import DenseMPO
+from tensornetwork.tn_keras.layers import DenseCondenser
+from tensornetwork.tn_keras.layers import DenseExpander
+from tensornetwork.tn_keras.layers import DenseEntangler
 from tensorflow.keras.layers import Dense  # type: ignore
 
 
@@ -397,7 +397,7 @@ def test_config(make_model):
 
   # Serialize model and use config to create new layer
   model_config = model.get_config()
-  layer_config = model_config['layers'][0]['config']
+  layer_config = model_config['layers'][1]['config']
   if 'mpo' in model.layers[0].name:
     new_model = DenseMPO.from_config(layer_config)
   elif 'decomp' in model.layers[0].name:

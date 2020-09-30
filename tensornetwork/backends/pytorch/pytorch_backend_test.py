@@ -18,6 +18,15 @@ def test_tensordot():
   np.testing.assert_allclose(expected, actual)
 
 
+def test_tensordot_int():
+  backend = pytorch_backend.PyTorchBackend()
+  a = backend.convert_to_tensor(2 * np.ones((3, 3, 3)))
+  b = backend.convert_to_tensor(np.ones((3, 3, 3)))
+  actual = backend.tensordot(a, b, 1)
+  expected = torch.tensordot(a, b, 1)
+  np.testing.assert_allclose(expected, actual)
+
+
 def test_reshape():
   backend = pytorch_backend.PyTorchBackend()
   a = backend.convert_to_tensor(np.ones((2, 3, 4)))
@@ -30,6 +39,16 @@ def test_transpose():
   a = backend.convert_to_tensor(
       np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
   actual = backend.transpose(a, [2, 0, 1])
+  expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
+  np.testing.assert_allclose(expected, actual)
+
+
+def test_transpose_noperm():
+  backend = pytorch_backend.PyTorchBackend()
+  a = backend.convert_to_tensor(
+      np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
+  actual = backend.transpose(a) # [2, 1, 0]
+  actual = backend.transpose(actual, perm=[0, 2, 1])
   expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
   np.testing.assert_allclose(expected, actual)
 
@@ -478,8 +497,9 @@ def test_eigs_not_implemented():
 
 def test_gmres_not_implemented():
   backend = pytorch_backend.PyTorchBackend()
+  dummy = backend.zeros(2)
   with pytest.raises(NotImplementedError):
-    backend.gmres(lambda x: x, np.ones((2)))
+    backend.gmres(lambda x: x, dummy)
 
 
 def test_broadcast_right_multiplication():
@@ -615,22 +635,22 @@ def test_trace(dtype, offset, axis1, axis2):
 
 
 def test_trace_raises():
-  shape = [1]*30
+  shape = tuple([1] * 30)
   backend = pytorch_backend.PyTorchBackend()
   array = backend.randn(shape, seed=10)
   with pytest.raises(ValueError):
     _ = backend.trace(array)
 
 
+@pytest.mark.parametrize("pivot_axis", [-1, 1, 2])
 @pytest.mark.parametrize("dtype", torch_randn_dtypes)
-def test_pivot(dtype):
+def test_pivot(dtype, pivot_axis):
   shape = (4, 3, 2, 8)
+  pivot_shape = (np.prod(shape[:pivot_axis]), np.prod(shape[pivot_axis:]))
   backend = pytorch_backend.PyTorchBackend()
   tensor = backend.randn(shape, dtype=dtype, seed=10)
-  cols = 12
-  rows = 16
-  expected = torch.reshape(tensor, (cols, rows))
-  actual = backend.pivot(tensor, pivot_axis=2)
+  expected = torch.reshape(tensor, pivot_shape)
+  actual = backend.pivot(tensor, pivot_axis=pivot_axis)
   np.testing.assert_allclose(expected, actual)
 
 

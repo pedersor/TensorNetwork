@@ -16,6 +16,15 @@ def test_tensordot():
   np.testing.assert_allclose(expected, actual)
 
 
+def test_tensordot_int():
+  backend = tensorflow_backend.TensorFlowBackend()
+  a = backend.convert_to_tensor(2 * np.ones((3, 3, 3)))
+  b = backend.convert_to_tensor(np.ones((3, 3, 3)))
+  actual = backend.tensordot(a, b, 1)
+  expected = tf.tensordot(a, b, 1)
+  np.testing.assert_allclose(expected, actual)
+
+
 def test_reshape():
   backend = tensorflow_backend.TensorFlowBackend()
   a = backend.convert_to_tensor(np.ones((2, 3, 4)))
@@ -28,6 +37,16 @@ def test_transpose():
   a = backend.convert_to_tensor(
       np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
   actual = backend.transpose(a, [2, 0, 1])
+  expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
+  np.testing.assert_allclose(expected, actual)
+
+
+def test_transpose_noperm():
+  backend = tensorflow_backend.TensorFlowBackend()
+  a = backend.convert_to_tensor(
+      np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
+  actual = backend.transpose(a)  # [2, 1, 0]
+  actual = backend.transpose(actual, perm=[0, 2, 1])
   expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
   np.testing.assert_allclose(expected, actual)
 
@@ -523,7 +542,7 @@ def test_diagflat(dtype, k):
   backend = tensorflow_backend.TensorFlowBackend()
   array = backend.randn((16,), dtype=dtype, seed=10)
   actual = backend.diagflat(array, k=k)
-  #pylint: disable=unexpected-keyword-arg
+  # pylint: disable=unexpected-keyword-arg
   expected = tf.linalg.diag(array, k=k)
   np.testing.assert_allclose(expected, actual)
 
@@ -570,13 +589,13 @@ def test_trace(dtype, offset, axis1, axis2):
     np.testing.assert_allclose(actual, expected, rtol=tol, atol=tol)
 
 
+@pytest.mark.parametrize("pivot_axis", [-1, 1, 2])
 @pytest.mark.parametrize("dtype", tf_dtypes)
-def test_pivot(dtype):
+def test_pivot(dtype, pivot_axis):
   shape = (4, 3, 2, 8)
+  pivot_shape = (np.prod(shape[:pivot_axis]), np.prod(shape[pivot_axis:]))
   backend = tensorflow_backend.TensorFlowBackend()
   tensor = backend.randn(shape, dtype=dtype, seed=10)
-  cols = 12
-  rows = 16
-  expected = tf.reshape(tensor, (cols, rows))
-  actual = backend.pivot(tensor, pivot_axis=2)
+  expected = tf.reshape(tensor, pivot_shape)
+  actual = backend.pivot(tensor, pivot_axis=pivot_axis)
   np.testing.assert_allclose(expected, actual)

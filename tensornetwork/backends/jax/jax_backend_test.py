@@ -5,10 +5,12 @@ import jax
 import pytest
 from tensornetwork.backends.jax import jax_backend
 import jax.config as config
+import tensornetwork.backends.jax.jitted_functions as jitted_functions
 # pylint: disable=no-member
 config.update("jax_enable_x64", True)
 np_randn_dtypes = [np.float32, np.float16, np.float64]
 np_dtypes = np_randn_dtypes + [np.complex64, np.complex128]
+np_not_half = [np.float32, np.float64, np.complex64, np.complex128]
 
 
 def test_tensordot():
@@ -17,6 +19,15 @@ def test_tensordot():
   b = backend.convert_to_tensor(np.ones((2, 3, 4)))
   actual = backend.tensordot(a, b, ((1, 2), (1, 2)))
   expected = np.array([[24.0, 24.0], [24.0, 24.0]])
+  np.testing.assert_allclose(expected, actual)
+
+
+def test_tensordot_int():
+  backend = jax_backend.JaxBackend()
+  a = backend.convert_to_tensor(2 * np.ones((3, 3, 3)))
+  b = backend.convert_to_tensor(np.ones((3, 3, 3)))
+  actual = backend.tensordot(a, b, 1)
+  expected = jax.numpy.tensordot(a, b, 1)
   np.testing.assert_allclose(expected, actual)
 
 
@@ -32,6 +43,16 @@ def test_transpose():
   a = backend.convert_to_tensor(
       np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
   actual = backend.transpose(a, [2, 0, 1])
+  expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
+  np.testing.assert_allclose(expected, actual)
+
+
+def test_transpose_noperm():
+  backend = jax_backend.JaxBackend()
+  a = backend.convert_to_tensor(
+      np.array([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]]))
+  actual = backend.transpose(a) # [2, 1, 0]
+  actual = backend.transpose(actual, perm=[0, 2, 1])
   expected = np.array([[[1.0, 3.0], [5.0, 7.0]], [[2.0, 4.0], [6.0, 8.0]]])
   np.testing.assert_allclose(expected, actual)
 
@@ -92,7 +113,7 @@ def test_sqrt():
   expected = np.array([2, 3])
   np.testing.assert_allclose(expected, actual)
 
-  
+
 def test_convert_to_tensor():
   backend = jax_backend.JaxBackend()
   array = np.ones((2, 3, 4))
@@ -100,7 +121,6 @@ def test_convert_to_tensor():
   expected = jax.jit(lambda x: x)(array)
   assert isinstance(actual, type(expected))
   np.testing.assert_allclose(expected, actual)
-
 
 def test_outer_product():
   backend = jax_backend.JaxBackend()
@@ -121,10 +141,9 @@ def test_einsum():
   np.testing.assert_allclose(expected, actual)
 
 
-@pytest.mark.skip(reason="TODO(chaseriley): Add type checking.")
 def test_convert_bad_test():
   backend = jax_backend.JaxBackend()
-  with pytest.raises(TypeError):
+  with pytest.raises(TypeError, match="Expected"):
     backend.convert_to_tensor(tf.ones((2, 2)))
 
 
@@ -540,112 +559,282 @@ def test_jit_args():
   np.testing.assert_allclose(res1, res3)
 
 
-def compare_eigvals_and_eigvecs(U, eta, U_exact, eta_exact, thresh=1E-8):
+def compare_eigvals_and_eigvecs(U,
+                                eta,
+                                U_exact,
+                                eta_exact,
+                                thresh=1E-8,
+                                rtol=1E-7,
+                                atol=0):
   _, iy = np.nonzero(np.abs(eta[:, None] - eta_exact[None, :]) < thresh)
   U_exact_perm = U_exact[:, iy]
   U_exact_perm = U_exact_perm / np.expand_dims(np.sum(U_exact_perm, axis=0), 0)
   U = U / np.expand_dims(np.sum(U, axis=0), 0)
-  np.testing.assert_allclose(U_exact_perm, U)
-  np.testing.assert_allclose(eta, eta_exact[iy])
+  np.testing.assert_allclose(U_exact_perm, U, atol=atol, rtol=rtol)
+  np.testing.assert_allclose(eta, eta_exact[iy], atol=atol, rtol=rtol)
+
+
+##############################################################
+#                   eigs and eigsh tests                     #
+##############################################################
+def generate_hermitian_matrix(be, dtype, D):
+  H = be.randn((D, D), dtype=dtype, seed=10)
+  H += H.T.conj()
+  return H
+
+
+def generate_matrix(be, dtype, D):
+  return be.randn((D, D), dtype=dtype, seed=10)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.complex128])
-def test_eigs_all_eigvals_with_init(dtype):
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_all_eigvals_with_init(dtype, solver, matrix_generator,
+                                          exact_decomp, which):
   backend = jax_backend.JaxBackend()
   D = 16
   np.random.seed(10)
   init = backend.randn((D,), dtype=dtype, seed=10)
-  H = backend.randn((D, D), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
 
   def mv(x, H):
     return jax.numpy.dot(H, x)
 
-  eta, U = backend.eigs(mv, [H], init, numeig=D, num_krylov_vecs=D)
-  eta_exact, U_exact = np.linalg.eig(H)
+  eta, U = solver(mv, [H], init, numeig=D, num_krylov_vecs=D, which=which)
+  eta_exact, U_exact = exact_decomp(H)
   compare_eigvals_and_eigvecs(
       np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-8)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.complex128])
-def test_eigs_all_eigvals_no_init(dtype):
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_all_eigvals_no_init(dtype, solver, matrix_generator,
+                                        exact_decomp, which):
   backend = jax_backend.JaxBackend()
   D = 16
   np.random.seed(10)
-  H = backend.randn((D, D), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
 
   def mv(x, H):
     return jax.numpy.dot(H, x)
 
-  eta, U = backend.eigs(
-      mv, [H], shape=(D,), dtype=dtype, numeig=D, num_krylov_vecs=D)
-  eta_exact, U_exact = np.linalg.eig(H)
+  eta, U = solver(
+      mv, [H],
+      shape=(D,),
+      dtype=dtype,
+      numeig=D,
+      num_krylov_vecs=D,
+      which=which)
+  eta_exact, U_exact = exact_decomp(H)
   compare_eigvals_and_eigvecs(
       np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-8)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.complex128])
-def test_eigs_few_eigvals_with_init(dtype):
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_few_eigvals_with_init(dtype, solver, matrix_generator,
+                                          exact_decomp, which):
   backend = jax_backend.JaxBackend()
   D = 16
   np.random.seed(10)
   init = backend.randn((D,), dtype=dtype, seed=10)
-  H = backend.randn((D, D), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
 
   def mv(x, H):
     return jax.numpy.dot(H, x)
 
-  eta, U = backend.eigs(mv, [H], init, numeig=4, num_krylov_vecs=10, maxiter=50)
-  eta_exact, U_exact = np.linalg.eig(H)
+  eta, U = solver(
+      mv, [H], init, numeig=4, num_krylov_vecs=16, maxiter=50, which=which)
+  eta_exact, U_exact = exact_decomp(H)
   compare_eigvals_and_eigvecs(
       np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-8)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.complex128])
-def test_eigs_few_eigvals_no_init(dtype):
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_few_eigvals_no_init(dtype, solver, matrix_generator,
+                                        exact_decomp, which):
   backend = jax_backend.JaxBackend()
   D = 16
   np.random.seed(10)
-  H = backend.randn((D, D), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
 
   def mv(x, H):
     return jax.numpy.dot(H, x)
 
-  eta, U = backend.eigs(
-      mv, [H], shape=(D,), dtype=dtype, numeig=4, num_krylov_vecs=10)
-  eta_exact, U_exact = np.linalg.eig(H)
+  eta, U = solver(
+      mv, [H],
+      shape=(D,),
+      dtype=dtype,
+      numeig=4,
+      num_krylov_vecs=16,
+      which=which)
+  eta_exact, U_exact = exact_decomp(H)
   compare_eigvals_and_eigvecs(
       np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-8)
 
 
-def test_eigs_raises():
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_large_ncv_with_init(dtype, solver, matrix_generator,
+                                        exact_decomp, which):
   backend = jax_backend.JaxBackend()
+  D = 16
+  np.random.seed(10)
+  init = backend.randn((D,), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
+
+  def mv(x, H):
+    return jax.numpy.dot(H, x)
+
+  eta, U = solver(
+      mv, [H], init, numeig=4, num_krylov_vecs=50, maxiter=50, which=which)
+  eta_exact, U_exact = exact_decomp(H)
+  compare_eigvals_and_eigvecs(
+      np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-8)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+@pytest.mark.parametrize(
+    "solver, matrix_generator, exact_decomp, which",
+    [(jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LM"),
+     (jax_backend.JaxBackend().eigs, generate_matrix, np.linalg.eig, "LR"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "SA"),
+     (jax_backend.JaxBackend().eigsh, generate_hermitian_matrix, np.linalg.eigh,
+      "LM")])
+def test_eigs_eigsh_large_matrix_with_init(dtype, solver, matrix_generator,
+                                           exact_decomp, which):
+  backend = jax_backend.JaxBackend()
+  D = 1000
+  np.random.seed(10)
+  init = backend.randn((D,), dtype=dtype, seed=10)
+  H = matrix_generator(backend, dtype, D)
+
+  def mv(x, H):
+    return jax.numpy.dot(H, x)
+
+  eta, U = solver(
+      mv, [H],
+      init,
+      numeig=4,
+      num_krylov_vecs=40,
+      maxiter=500,
+      which=which,
+      tol=1E-5)
+  eta_exact, U_exact = exact_decomp(H)
+  compare_eigvals_and_eigvecs(
+      np.stack(U, axis=1), eta, U_exact, eta_exact, thresh=1E-4, atol=1E-4)
+
+
+@pytest.mark.parametrize(
+    "solver, whichs",
+    [(jax_backend.JaxBackend().eigs, ["SM", "SR", "LI", "SI"]),
+     (jax_backend.JaxBackend().eigsh, ["SM", "BE"])])
+def test_eigs_eigsh_raises(solver, whichs):
   with pytest.raises(
       ValueError, match='`num_krylov_vecs` >= `numeig` required!'):
-    backend.eigs(lambda x: x, numeig=10, num_krylov_vecs=9)
+    solver(lambda x: x, numeig=10, num_krylov_vecs=9)
 
   with pytest.raises(
       ValueError,
       match="if no `initial_state` is passed, then `shape` and"
       "`dtype` have to be provided"):
-    backend.eigs(lambda x: x, shape=(10,), dtype=None)
+    solver(lambda x: x, shape=(10,), dtype=None)
   with pytest.raises(
       ValueError,
       match="if no `initial_state` is passed, then `shape` and"
       "`dtype` have to be provided"):
-    backend.eigs(lambda x: x, shape=None, dtype=np.float64)
+    solver(lambda x: x, shape=None, dtype=np.float64)
   with pytest.raises(
       ValueError,
       match="if no `initial_state` is passed, then `shape` and"
       "`dtype` have to be provided"):
-    backend.eigs(lambda x: x)
+    solver(lambda x: x)
   with pytest.raises(
       TypeError, match="Expected a `jax.array`. Got <class 'list'>"):
-    backend.eigs(lambda x: x, initial_state=[1, 2, 3])
-  for which in ('SI', 'LI', 'SM', 'SR'):
+    solver(lambda x: x, initial_state=[1, 2, 3])
+  for which in whichs:
     with pytest.raises(
         ValueError, match=f"which = {which}"
         f" is currently not supported."):
-      backend.eigs(lambda x: x, which=which)
+      solver(lambda x: x, which=which)
+
+
+def test_eigs_dtype_raises():
+  solver = jax_backend.JaxBackend().eigs
+  with pytest.raises(TypeError, match="dtype"):
+    solver(lambda x: x, shape=(10,), dtype=np.int32)
+
+##################################################################
+#############  This test should just not crash    ################
+##################################################################
+@pytest.mark.parametrize("dtype",
+                         [np.float64, np.complex128, np.float32, np.complex64])
+def test_eigs_bugfix(dtype):
+  backend = jax_backend.JaxBackend()
+  D = 200
+  mat = jax.numpy.array(np.random.rand(D, D).astype(dtype))
+  x = jax.numpy.array(np.random.rand(D).astype(dtype))
+
+  def matvec_jax(vector, matrix):
+    return matrix @ vector
+
+  backend.eigs(
+      matvec_jax, [mat],
+      numeig=1,
+      initial_state=x,
+      which='LR',
+      maxiter=10,
+      num_krylov_vecs=100,
+      tol=0.0001)
 
 
 def test_sum():
@@ -672,7 +861,12 @@ def test_matmul():
   actual = backend.matmul(a, b)
   expected = np.matmul(t1, t2)
   np.testing.assert_allclose(expected, actual)
-
+  t3 = np.random.rand(10)
+  t4 = np.random.rand(11)
+  c = backend.convert_to_tensor(t3)
+  d = backend.convert_to_tensor(t4)
+  with pytest.raises(ValueError, match="inputs to"):
+    backend.matmul(c, d)
 
 def test_gmres_raises():
   backend = jax_backend.JaxBackend()
@@ -689,7 +883,7 @@ def test_gmres_raises():
   b = jax.numpy.zeros((N,), dtype=jax.numpy.float64)
   diff = (f"If x0 is supplied, its dtype, {x0.dtype}, must match b's"
           f", {b.dtype}.")
-  with pytest.raises(ValueError, match=diff): # x0, b have different dtypes
+  with pytest.raises(TypeError, match=diff): # x0, b have different dtypes
     backend.gmres(dummy_mv, b, x0=x0)
 
   x0 = jax.numpy.zeros((N,))
@@ -699,14 +893,9 @@ def test_gmres_raises():
     backend.gmres(dummy_mv, b, x0=x0)
 
   num_krylov_vectors = 0
-  diff = (f"num_krylov_vectors must be in "
-          f"0 < {num_krylov_vectors} <= {b.size}")
+  diff = (f"num_krylov_vectors must be positive, not"
+          f"{num_krylov_vectors}.")
   with pytest.raises(ValueError, match=diff): # num_krylov_vectors <= 0
-    backend.gmres(dummy_mv, b, num_krylov_vectors=num_krylov_vectors)
-  num_krylov_vectors = N+1
-  diff = (f"num_krylov_vectors must be in "
-          f"0 < {num_krylov_vectors} <= {b.size}")
-  with pytest.raises(ValueError, match=diff): # num_krylov_vectors > b.size
     backend.gmres(dummy_mv, b, num_krylov_vectors=num_krylov_vectors)
 
   tol = -1.
@@ -730,8 +919,7 @@ def test_gmres_raises():
     backend.gmres(dummy_mv, b, A_kwargs=A_kwargs)
 
 
-jax_qr_dtypes = [np.float32, np.float64, np.complex64, np.complex128]
-@pytest.mark.parametrize("dtype", jax_qr_dtypes)
+@pytest.mark.parametrize("dtype", np_dtypes)
 def test_gmres_on_small_known_problem(dtype):
   dummy = jax.numpy.zeros(1, dtype=dtype)
   dtype = dummy.dtype
@@ -751,7 +939,30 @@ def test_gmres_on_small_known_problem(dtype):
   assert eps < tol
 
 
-@pytest.mark.parametrize("dtype", jax_qr_dtypes)
+@pytest.mark.parametrize("dtype", np_dtypes)
+def test_gmres_with_args(dtype):
+  dummy = jax.numpy.zeros(1, dtype=dtype)
+  dtype = dummy.dtype
+
+  backend = jax_backend.JaxBackend()
+  A = jax.numpy.zeros((2, 2), dtype=dtype)
+  B = jax.numpy.array(([[0, 1], [3, 0]]), dtype=dtype)
+  C = jax.numpy.array(([[1, 0], [0, -4]]), dtype=dtype)
+  b = jax.numpy.array([3, 2], dtype=dtype)
+  x0 = jax.numpy.ones(2, dtype=dtype)
+  n_kry = 2
+
+  def A_mv(x, B, C):
+    return (A + B + C) @ x
+  tol = 100*jax.numpy.finfo(dtype).eps
+  x, _ = backend.gmres(A_mv, b, A_args=[B, C], x0=x0, num_krylov_vectors=n_kry,
+                       tol=tol)
+  solution = jax.numpy.array([2., 1.], dtype=dtype)
+  eps = jax.numpy.linalg.norm(jax.numpy.abs(solution) - jax.numpy.abs(x))
+  assert eps < tol
+
+
+@pytest.mark.parametrize("dtype", np_dtypes)
 def test_gmres_on_larger_random_problem(dtype):
   dummy = jax.numpy.zeros(1, dtype=dtype)
   dtype = dummy.dtype
@@ -764,7 +975,29 @@ def test_gmres_on_larger_random_problem(dtype):
     return A @ x
   b = A_mv(solution)
   tol = b.size * jax.numpy.finfo(dtype).eps
-  x, _ = backend.gmres(A_mv, b, tol=tol) # atol = tol by default
+  x, _ = backend.gmres(A_mv, b, tol=tol, num_krylov_vectors=100)
+  err = jax.numpy.linalg.norm(jax.numpy.abs(x)-jax.numpy.abs(solution))
+  rtol = tol*jax.numpy.linalg.norm(b)
+  atol = tol
+  assert err < max(rtol, atol)
+
+
+@pytest.mark.parametrize("dtype", np_dtypes)
+def test_gmres_not_matrix(dtype):
+  dummy = jax.numpy.zeros(1, dtype=dtype)
+  dtype = dummy.dtype
+  backend = jax_backend.JaxBackend()
+  matshape = (100, 100)
+  vecshape = (100,)
+  A = backend.randn(matshape, dtype=dtype, seed=10)
+  A = backend.reshape(A, (2, 50, 2, 50))
+  solution = backend.randn(vecshape, dtype=dtype, seed=10)
+  solution = backend.reshape(solution, (2, 50))
+  def A_mv(x):
+    return backend.einsum('ijkl,kl', A, x)
+  b = A_mv(solution)
+  tol = b.size * np.finfo(dtype).eps
+  x, _ = backend.gmres(A_mv, b, tol=tol, num_krylov_vectors=100)
   err = jax.numpy.linalg.norm(jax.numpy.abs(x)-jax.numpy.abs(solution))
   rtol = tol*jax.numpy.linalg.norm(b)
   atol = tol
@@ -837,13 +1070,29 @@ def test_sign(dtype):
   np.testing.assert_allclose(expected, actual)
 
 
+@pytest.mark.parametrize("pivot_axis", [-1, 1, 2])
 @pytest.mark.parametrize("dtype", np_dtypes)
-def test_pivot(dtype):
+def test_pivot(dtype, pivot_axis):
   shape = (4, 3, 2, 8)
+  pivot_shape = (np.prod(shape[:pivot_axis]), np.prod(shape[pivot_axis:]))
   backend = jax_backend.JaxBackend()
   tensor = backend.randn(shape, dtype=dtype, seed=10)
-  cols = 12
-  rows = 16
-  expected = tensor.reshape((cols, rows))
-  actual = backend.pivot(tensor, pivot_axis=2)
+  expected = tensor.reshape(pivot_shape)
+  actual = backend.pivot(tensor, pivot_axis=pivot_axis)
   np.testing.assert_allclose(expected, actual)
+
+
+@pytest.mark.parametrize("dtype, atol", [(np.float32, 1E-6),
+                                         (np.float64, 1E-10),
+                                         (np.complex64, 1E-6),
+                                         (np.complex128, 1E-10)])
+def test_inv(dtype, atol):
+  shape = (10, 10)
+  backend = jax_backend.JaxBackend()
+  matrix = backend.randn(shape, dtype=dtype, seed=10)
+  inv = backend.inv(matrix)
+  np.testing.assert_allclose(inv @ matrix, np.eye(10), atol=atol)
+  np.testing.assert_allclose(matrix @ inv, np.eye(10), atol=atol)
+  tensor = backend.randn((10, 10, 10), dtype=dtype, seed=10)
+  with pytest.raises(ValueError, match="input to"):
+    backend.inv(tensor)

@@ -13,30 +13,36 @@
 # limitations under the License.
 #pyling: disable=line-too-long
 from typing import Optional, Any, Sequence, Tuple, Callable, List, Text, Type
+from typing import Union
 from tensornetwork.backends import abstract_backend
 from tensornetwork.backends.numpy import decompositions
+import io
 import numpy as np
 import scipy as sp
 import scipy.sparse.linalg
 Tensor = Any
 
 int_to_string = np.array(list(map(chr, list(range(65, 91)))))
+
+
 class NumPyBackend(abstract_backend.AbstractBackend):
   """See base_backend.BaseBackend for documentation."""
 
   def __init__(self) -> None:
-    super(NumPyBackend, self).__init__()
+    super().__init__()
     self.name = "numpy"
 
   def tensordot(self, a: Tensor, b: Tensor,
-                axes: Sequence[Sequence[int]]) -> Tensor:
+                axes: Union[int, Sequence[Sequence[int]]]) -> Tensor:
     # use einsum for scalar-like products, its much faster
     if not isinstance(axes, int):
       if (len(axes[0]) == a.ndim) and (len(axes[1]) == b.ndim):
         if not len(axes[0]) == len(axes[1]):
           raise ValueError("shape-mismatch for sum")
-        u, pos1, _ = np.intersect1d(
-            axes[0], axes[1], return_indices=True, assume_unique=True)
+        u, pos1, _ = np.intersect1d(axes[0],
+                                    axes[1],
+                                    return_indices=True,
+                                    assume_unique=True)
         labels = int_to_string[0:len(u)]
         labels_1 = labels[pos1]
         labels_2 = np.array([''] * len(labels_1))
@@ -50,7 +56,9 @@ class NumPyBackend(abstract_backend.AbstractBackend):
   def reshape(self, tensor: Tensor, shape: Tensor) -> Tensor:
     return np.reshape(tensor, np.asarray(shape).astype(np.int32))
 
-  def transpose(self, tensor, perm) -> Tensor:
+  def transpose(self,
+                tensor: Tensor,
+                perm: Optional[Sequence] = None) -> Tensor:
     return np.transpose(tensor, perm)
 
   def slice(self, tensor: Tensor, start_indices: Tuple[int, ...],
@@ -157,6 +165,54 @@ class NumPyBackend(abstract_backend.AbstractBackend):
   def eigh(self, matrix: Tensor) -> Tuple[Tensor, Tensor]:
     return np.linalg.eigh(matrix)
 
+  def eigsh(
+      self,
+      A: Callable,
+      args: Optional[List[Tensor]] = None,
+      initial_state: Optional[Tensor] = None,
+      shape: Optional[Tuple[int, ...]] = None,
+      dtype: Optional[Type[np.number]] = None,  # pylint: disable=no-member
+      num_krylov_vecs: int = 50,
+      numeig: int = 1,
+      tol: float = 1E-8,
+      which: Text = 'LR',
+      maxiter: Optional[int] = None) -> Tuple[Tensor, List]:
+    """Lanczos method for finding the lowest eigenvector-eigenvalue pairs
+    of a symmetric (hermitian) linear operator `A`. `A` is a callable 
+    implementing the matrix-vector product. If no `initial_state` is provided 
+    then `shape` and `dtype` have to be passed so that a suitable initial
+    state can be randomly  generated.
+    Args:
+      A: A (sparse) implementation of a linear operator
+      arsg: A list of arguments to `A`.  `A` will be called as
+        `res = A(initial_state, *args)`.
+      initial_state: An initial vector for the algorithm. If `None`,
+        a random initial `Tensor` is created using the `numpy.random.randn`
+        method.
+      shape: The shape of the input-dimension of `A`.
+      dtype: The dtype of the input `A`. If both no `initial_state` is provided,
+        a random initial state with shape `shape` and dtype `dtype` is created.
+      num_krylov_vecs: The number of iterations (number of krylov vectors).
+      numeig: The nummber of eigenvector-eigenvalue pairs to be computed.
+        If `numeig > 1`, `reorthogonalize` has to be `True`.
+      tol: The desired precision of the eigenvalus. Uses
+      which : ['LM' | 'SM' | 'LR' | 'SR' | 'LI' | 'SI']
+        Which `k` eigenvectors and eigenvalues to find:
+            'LM' : largest magnitude
+            'SM' : smallest magnitude
+            'LR' : largest real part
+            'SR' : smallest real part
+            'LI' : largest imaginary part
+            'SI' : smallest imaginary part
+        Note that not all of those might be supported by specialized backends.
+      maxiter: The maximum number of iterations.
+    Returns:
+       `Tensor`: An array of `numeig` lowest eigenvalues
+       `list`: A list of `numeig` lowest eigenvectors
+    """
+    raise NotImplementedError("Backend '{}' has not implemented eigs.".format(
+        self.name))
+  
   def eigs(self,
            A: Callable,
            args: Optional[List] = None,
@@ -170,10 +226,9 @@ class NumPyBackend(abstract_backend.AbstractBackend):
            maxiter: Optional[int] = None) -> Tuple[Tensor, List]:
     """
     Arnoldi method for finding the lowest eigenvector-eigenvalue pairs
-    of a linear operator `A`. `A` can be either a
-    scipy.sparse.linalg.LinearOperator object or a regular callable.
-    If no `initial_state` is provided then `A` has to have an attribute
-    `shape` so that a suitable initial state can be randomly generated.
+    of a linear operator `A`. If no `initial_state` is provided then
+    `shape` and `dtype` are required so that a suitable initial state can be
+    randomly generated.
     This is a wrapper for scipy.sparse.linalg.eigs which only supports
     a subset of the arguments of scipy.sparse.linalg.eigs.
 
@@ -199,11 +254,9 @@ class NumPyBackend(abstract_backend.AbstractBackend):
             'SR' : smallest real part
             'LI' : largest imaginary part
       maxiter: The maximum number of iterations.
-      dtype: An optional numpy-dtype. If provided, the
-        return type will be cast to `dtype`.
     Returns:
        `np.ndarray`: An array of `numeig` lowest eigenvalues
-       `np.ndarray`: An array of `numeig` lowest eigenvectors
+       `list`: A list of `numeig` lowest eigenvectors
     """
     if args is None:
       args = []
@@ -230,37 +283,31 @@ class NumPyBackend(abstract_backend.AbstractBackend):
 
     #initial_state is an np.ndarray of rank 1, so we can
     #savely deduce the shape from it
-    lop = sp.sparse.linalg.LinearOperator(
-        dtype=initial_state.dtype,
-        shape=(np.prod(initial_state.shape), np.prod(initial_state.shape)),
-        matvec=matvec)
-    eta, U = sp.sparse.linalg.eigs(
-        A=lop,
-        k=numeig,
-        which=which,
-        v0=initial_state,
-        ncv=num_krylov_vecs,
-        tol=tol,
-        maxiter=maxiter)
-    if dtype:
-      eta = eta.astype(dtype)
-      U = U.astype(dtype)
-    evs = list(eta)
+    lop = scipy.sparse.linalg.LinearOperator(dtype=initial_state.dtype,
+                                             shape=(initial_state.size,
+                                                    initial_state.size),
+                                             matvec=matvec)
+    eta, U = scipy.sparse.linalg.eigs(A=lop,
+                                      k=numeig,
+                                      which=which,
+                                      v0=initial_state,
+                                      ncv=num_krylov_vecs,
+                                      tol=tol,
+                                      maxiter=maxiter)
     eVs = [np.reshape(U[:, n], shape) for n in range(numeig)]
-    return evs, eVs
+    return eta, eVs
 
-  def gmres(self,
-            A_mv: Callable,
-            b: np.ndarray,
-            A_args: Optional[List] = None,
-            A_kwargs: Optional[dict] = None,
-            x0: Optional[np.ndarray] = None,
-            tol: float = 1E-05,
-            atol: Optional[float] = None,
-            num_krylov_vectors: Optional[int] = None,
-            maxiter: Optional[int] = 1,
-            M: Optional[Callable] = None
-            ) -> Tuple[np.ndarray, int]:
+  def _gmres(self,
+             A_mv: Callable,
+             b: Tensor,
+             A_args: List,
+             A_kwargs: dict,
+             x0: Tensor,
+             tol: float,
+             atol: float,
+             num_krylov_vectors: int,
+             maxiter: int,
+             M: Optional[Callable] = None) -> Tuple[Tensor, int]:
     """ GMRES solves the linear system A @ x = b for x given a vector `b` and
     a general (not necessarily symmetric/Hermitian) linear operator `A`.
 
@@ -315,9 +362,9 @@ class NumPyBackend(abstract_backend.AbstractBackend):
                           atol=tol
       num_krylov_vectors
                : Size of the Krylov space to build at each restart.
-                 Expense is cubic in this parameter. If supplied, it must be
-                 an integer in 0 < num_krylov_vectors <= b.size.
-                 Default: b.size.
+                 Expense is cubic in this parameter. It must be postive.
+                 If greater than b.size, it will be set to b.size.
+                 Default: 20.
       maxiter  : The Krylov space will be repeatedly rebuilt up to this many
                  times. Large values of this argument
                  should be used only with caution, since especially for nearly
@@ -336,38 +383,12 @@ class NumPyBackend(abstract_backend.AbstractBackend):
                    indicates some kind of floating point issue).
                   -if num_krylov_vectors is 0 or exceeds b.size.
                   -if tol was negative.
+      TypeError:  -if the dtype of `x0` and `b` are mismatching.
 
     Returns:
       x       : The converged solution. It has the same shape as `b`.
       info    : 0 if convergence was achieved, the number of restarts otherwise.
     """
-
-    if x0 is not None and x0.shape != b.shape:
-      errstring = (f"If x0 is supplied, its shape, {x0.shape}, must match b's"
-                   f", {b.shape}.")
-      raise ValueError(errstring)
-    if x0 is not None and x0.dtype != b.dtype:
-      errstring = (f"If x0 is supplied, its dtype, {x0.dtype}, must match b's"
-                   f", {b.dtype}.")
-      raise ValueError(errstring)
-    if num_krylov_vectors is None:
-      num_krylov_vectors = b.size
-    if num_krylov_vectors <= 0 or num_krylov_vectors > b.size:
-      errstring = (f"num_krylov_vectors must be in "
-                   f"0 < {num_krylov_vectors} <= {b.size}.")
-      raise ValueError(errstring)
-    if tol < 0:
-      raise ValueError(f"tol = {tol} must be positive.")
-    if atol is None:
-      atol = tol
-    if atol < 0:
-      raise ValueError(f"atol = {atol} must be positive.")
-
-    if A_args is None:
-      A_args = []
-    if A_kwargs is None:
-      A_kwargs = {}
-
     def matvec(v):
       v_tensor = v.reshape(b.shape)
       Av = A_mv(v_tensor, *A_args, **A_kwargs)
@@ -375,13 +396,20 @@ class NumPyBackend(abstract_backend.AbstractBackend):
       return Avec
 
     A_shape = (b.size, b.size)
-    A_op = sp.sparse.linalg.LinearOperator(matvec=matvec, shape=A_shape)
-    x, info = sp.sparse.linalg.gmres(A_op, b, x0=x0, tol=tol, atol=atol,
+    A_op = sp.sparse.linalg.LinearOperator(matvec=matvec,
+                                           shape=A_shape,
+                                           dtype=b.dtype)
+    x, info = sp.sparse.linalg.gmres(A_op,
+                                     b.ravel(),
+                                     x0,
+                                     tol=tol,
+                                     atol=atol,
                                      restart=num_krylov_vectors,
-                                     maxiter=maxiter, M=M)
+                                     maxiter=maxiter,
+                                     M=M)
     if info < 0:
       raise ValueError("ARPACK gmres received illegal input or broke down.")
-    x = x.reshape(b.shape)
+    x = x.reshape(b.shape).astype(b.dtype)
     return (x, info)
 
   def eigsh_lanczos(self,
@@ -591,33 +619,31 @@ class NumPyBackend(abstract_backend.AbstractBackend):
       max_truncation_error: Optional[float] = None,
       relative: Optional[bool] = False
   ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    return decompositions.svd(
-        np,
-        tensor,
-        pivot_axis,
-        max_singular_values,
-        max_truncation_error,
-        relative=relative)
+    return decompositions.svd(np,
+                              tensor,
+                              pivot_axis,
+                              max_singular_values,
+                              max_truncation_error,
+                              relative=relative)
 
-  def qr(
-      self,
-      tensor: Tensor,
-      pivot_axis: int = -1,
-      non_negative_diagonal: bool = False
-  ) -> Tuple[Tensor, Tensor]:
+  def qr(self,
+         tensor: Tensor,
+         pivot_axis: int = -1,
+         non_negative_diagonal: bool = False) -> Tuple[Tensor, Tensor]:
     #pylint: disable=too-many-function-args
     return decompositions.qr(np, tensor, pivot_axis, non_negative_diagonal)
 
-  def rq(
-      self,
-      tensor: Tensor,
-      pivot_axis: int = -1,
-      non_negative_diagonal: bool = False
-  ) -> Tuple[Tensor, Tensor]:
+  def rq(self,
+         tensor: Tensor,
+         pivot_axis: int = -1,
+         non_negative_diagonal: bool = False) -> Tuple[Tensor, Tensor]:
     #pylint: disable=too-many-function-args
     return decompositions.rq(np, tensor, pivot_axis, non_negative_diagonal)
-  
-  def diagonal(self, tensor: Tensor, offset: int = 0, axis1: int = -2,
+
+  def diagonal(self,
+               tensor: Tensor,
+               offset: int = 0,
+               axis1: int = -2,
                axis2: int = -1) -> Tensor:
     """Return specified diagonals.
 
@@ -655,7 +681,10 @@ class NumPyBackend(abstract_backend.AbstractBackend):
     """
     return np.diagflat(tensor, k=k)
 
-  def trace(self, tensor: Tensor, offset: int = 0, axis1: int = -2,
+  def trace(self,
+            tensor: Tensor,
+            offset: int = 0,
+            axis1: int = -2,
             axis2: int = -1) -> Tensor:
     """Return summed entries along diagonals.
 
@@ -699,3 +728,34 @@ class NumPyBackend(abstract_backend.AbstractBackend):
       tensor: The input tensor.
     """
     return np.sign(tensor)
+
+  def serialize_tensor(self, tensor: Tensor) -> str:
+    """
+    Return a string that serializes the given tensor.
+    
+    Args:
+      tensor: The input tensor.
+      
+    Returns:
+      A string representing the serialized tensor. 
+    """
+    m = io.BytesIO()
+    np.save(m, tensor, allow_pickle=False)
+    m.seek(0)
+    return str(m.read(), encoding='latin-1')
+
+  def deserialize_tensor(self, s: str) -> Tensor:
+    """
+    Return a tensor given a serialized tensor string. 
+    
+    Args:
+      s: The input string representing a serialized tensor.
+      
+    Returns:
+      The tensor object represented by the string.
+     
+    """
+    m = io.BytesIO()
+    m.write(s.encode('latin-1'))
+    m.seek(0)
+    return np.load(m)
